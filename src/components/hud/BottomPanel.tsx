@@ -1,12 +1,17 @@
+import { useOrionStore } from "../../store/orionStore";
+
 export default function BottomPanel() {
+  const command =
+    useOrionStore((s) => s.command);
+
   return (
     <div className="orion-console">
       <span className="prompt">
-        {"ORION >"}
-        </span>
+        ORION &gt;
+      </span>
 
-      <span className="typing">
-        Awaiting Command...
+      <span>
+        {command || "Listening..."}
       </span>
     </div>
   );

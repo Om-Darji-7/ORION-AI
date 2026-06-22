@@ -9,10 +9,10 @@ import CameraRig from "./CameraRig";
 import AIHalo from "../ai/AIHalo";
 import OrbitRings from "../ai/OrbitRings";
 import EnergyPulse from "../ai/EnergyPulse";
-import ScanBeam from "../ai/ScanBeam";
 import AuraParticles from "../ai/AuraParticles";
 import ScannerSweep from "../ai/ScannerSweep";
 import Face from "../ai/Face";
+
 
 export default function Scene() {
   return (
@@ -46,7 +46,15 @@ export default function Scene() {
       <Space />
       <CameraRig />
       <Particles />
-      <Neural />
+      {/* Scene.tsx file ke andar badlein: */}
+        <group position={[-13, 0, -6]}>
+          <Neural />
+        </group>
+          
+        <group position={[13, 0, -6]}>
+          <Neural />
+        </group>
+
       <Face />
       <AICore />
       <AuraParticles />
@@ -54,7 +62,6 @@ export default function Scene() {
       <AIHalo />
       <OrbitRings />
       <EnergyPulse />
-      <ScanBeam />
       <FloorGrid />
       <EffectComposer>
         <Bloom
