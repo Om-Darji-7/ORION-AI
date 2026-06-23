@@ -15,7 +15,7 @@ export default function HUD() {
       <RightPanel />
       <BottomPanel />
       <Radar />
-      <VoiceRing />
+      
       <Corners />
 
       <DataCard
@@ -35,14 +35,14 @@ export default function HUD() {
       <DataCard
         title="SECURITY"
         value="ACTIVE"
-        top={420}
+        top={320}
         left={50}
       />
 
       <DataCard
         title="MEMORY"
         value="ONLINE"
-        top={420}
+        top={320}
         right={50}
       />
     </>

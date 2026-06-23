@@ -50,24 +50,33 @@ export default function Face() {
     });
   }, [scene, lineMat, pointMat]);
 
-  useFrame(({ clock, mouse }) => {
-    if (!group.current) return;
+  useFrame(({ clock }) => {
+  if (!group.current) return;
 
-    // Up-Down Floating animation
-    group.current.position.y = Math.sin(clock.elapsedTime) * 0.15;
+  // 1. Smooth up-down floating wave chalti rahegi bina mouse movement ke
+  group.current.position.y = Math.sin(clock.elapsedTime * 0.4) * 0.1;
 
-    // Mouse movement rotation
-    group.current.rotation.y += 0.001;
-    group.current.rotation.x = -mouse.y * 0.2;
-  });
+  // 2. 🔥 MOUSE TRACKING REMOVED:
+  // mouse.x aur mouse.y ko poora hata kar dynamic angles ko constant flat values par lock kar diya.
+  // Ab face bina kisi shart ke hamesha perfectly stable reh kar right side hi dekhega.
+  group.current.rotation.y = Math.PI / 2; // Pure 90-degree perfect side view layout
+  group.current.rotation.x = 0;           // Pitch zero straight alignment
+});
+
+
 
   return (
-    <group ref={group}>
-      <primitive
-        object={scene}
-        scale={3} // Aapka purana perfect size layout matrix
-        position={[0, 0, 0]}
-      />
-    </group>
-  );
+  /* 🔥 PRIMITIVE SE POSITION HATA KAR DIRECT GROUP PAR LAGAI FORCED LEFT SHIFT KE LIYE */
+  <group 
+    ref={group} 
+    position={[-11, 0, 0]} // Pura group hi 3D space mein ekdam left chala jayega
+    scale={8}              // Scale ko bhi group par daal diya taaki mesh structure control mein rahe
+  >
+    <primitive
+      object={scene}
+      // Yahan se scale aur position ko hata kar clean kar diya
+      position={[0, 0, 0]} 
+    />
+  </group>
+);
 }

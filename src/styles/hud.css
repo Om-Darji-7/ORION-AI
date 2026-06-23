@@ -15,7 +15,7 @@
 
 .left-panel{
   position:absolute;
-  left:20px;
+  right:250px;
   top:120px;
 
   width:220px;
@@ -314,28 +314,12 @@
   z-index:1000;
 }
 
-.tl{
-  top:20px;
-  left:20px;
-
-  border-top:2px solid #00ffff;
-  border-left:2px solid #00ffff;
-}
-
 .tr{
   top:20px;
   right:20px;
 
   border-top:2px solid #00ffff;
   border-right:2px solid #00ffff;
-}
-
-.bl{
-  bottom:20px;
-  left:20px;
-
-  border-bottom:2px solid #00ffff;
-  border-left:2px solid #00ffff ;
 }
 
 .br{
@@ -394,7 +378,7 @@
   position:absolute;
 
   width:180px;
-
+  right:100px;
   padding:12px;
 
   border:1px solid rgba(0,255,255,.2);

@@ -55,7 +55,9 @@ export default function Scene() {
           <Neural />
         </group>
 
-      <Face />
+      <group position={[0, -1, 0]}>  {/* Y-axis par 1.2 badhane se face poora upar shift ho jayega */}
+  <Face />
+</group>
       <AICore />
       <AuraParticles />
       <ScannerSweep />
