@@ -1,19 +1,39 @@
 import { create } from "zustand";
 
-interface OrionState {
-  command: string;
-  response: string;    // 🔥 Orion ka AI response save karne ke liye
-  voiceActive: boolean; 
-  setCommand: (cmd: string) => void;
-  setResponse: (res: string) => void; // 🔥 Response update karne ke liye
-  setVoiceActive: (status: boolean) => void;
+type OrionState =
+  | "idle"
+  | "listening"
+  | "thinking"
+  | "speaking";
+
+interface OrionStore {
+
+  state: OrionState;
+
+  transcript: string;
+
+  response: string;
+
+  setState:(v:OrionState)=>void;
+
+  setTranscript:(v:string)=>void;
+
+  setResponse:(v:string)=>void;
+
 }
 
-export const useOrionStore = create<OrionState>((set) => ({
-  command: "",
-  response: "",
-  voiceActive: false,
-  setCommand: (cmd: string) => set({ command: cmd }),
-  setResponse: (res: string) => set({ response: res }),
-  setVoiceActive: (status: boolean) => set({ voiceActive: status }),
+export const useOrionStore=create<OrionStore>((set)=>({
+
+    state:"idle",
+
+    transcript:"",
+
+    response:"",
+
+    setState:(v)=>set({state:v}),
+
+    setTranscript:(v)=>set({transcript:v}),
+
+    setResponse:(v)=>set({response:v})
+
 }));

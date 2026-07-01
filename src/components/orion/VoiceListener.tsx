@@ -1,140 +1,140 @@
 import { useEffect, useRef } from "react";
+import { askOrion } from "../../services/orionAPI";
 import { useOrionStore } from "../../store/orionStore";
 
-const commandRoutes = [
-  {
-    labels: ["open vs code", "open visual studio code", "start vs code"],
-    title: "VS Code",
-    response: "VS Code intent detected. Local automation route is ready."
-  },
-  {
-    labels: ["open chrome", "start chrome", "launch chrome"],
-    title: "Chrome",
-    response: "Chrome intent detected. Browser launch route is ready."
-  }
-];
+function speak(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    window.speechSynthesis.cancel();
 
-function speak(message: string) {
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel(); 
-  const utterance = new SpeechSynthesisUtterance(message);
-  const voices = window.speechSynthesis.getVoices();
-  const pureHumanVoice = voices.find(v => 
-    v.name.toLowerCase().includes("natural") ||       
-    v.name.toLowerCase().includes("google us english") || 
-    v.name.toLowerCase().includes("guy") ||           
-    v.name.toLowerCase().includes("aria")             
-  ) || voices.find(v => v.lang.startsWith("en-"));    
+    const utterance = new SpeechSynthesisUtterance(text);
 
-  if (pureHumanVoice) utterance.voice = pureHumanVoice;
-  utterance.rate = 1.0;   
-  utterance.pitch = 1.0;  
-  window.speechSynthesis.speak(utterance);
-}
+    const voices = window.speechSynthesis.getVoices();
 
-async function askLocalAI(prompt: string, setResponse: (res: string) => void) {
-  try {
-    setResponse("Thinking...");
-    const res = await fetch("http://localhost:11434/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "deepseek-r1:1.5b",
-        prompt: `You are ORION, a premium cybernetic AI assistant. Respond to the user request shortly, crisply and professionally in 1-2 lines maximum. Do not include thinking tags. User: ${prompt}`,
-        stream: false
-      })
-    });
+    const voice =
+      voices.find((v) => v.lang.startsWith("en")) ||
+      voices[0];
 
-    const data = await res.json();
-    let aiAnswer = data.response || "No response received.";
-    aiAnswer = aiAnswer.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    if (voice) utterance.voice = voice;
 
-    console.log("🤖 ORION RESPONSE:", aiAnswer);
-    setResponse(aiAnswer);
-    speak(aiAnswer);
-  } catch (error) {
-    console.error("Ollama connection error:", error);
-    const fallbackMsg = "Connection to local brain failed.";
-    setResponse(fallbackMsg);
-    speak(fallbackMsg);
-  }
+    utterance.rate = 1;
+    utterance.pitch = 1;
+
+    utterance.onend = () => resolve();
+
+    window.speechSynthesis.speak(utterance);
+  });
 }
 
 export default function VoiceListener() {
-  const setCommand = useOrionStore((s) => s.setCommand);
-  const setResponse = useOrionStore((s) => s.setResponse);
-  const setVoiceActive = useOrionStore((s) => s.setVoiceActive);
+
   const recognitionRef = useRef<any>(null);
 
+  const speakingRef = useRef(false);
+
+  const setState = useOrionStore((s) => s.setState);
+
+  const setTranscript = useOrionStore((s) => s.setTranscript);
+
+  const setResponse = useOrionStore((s) => s.setResponse);
+
   useEffect(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+
+      alert("Speech Recognition not supported.");
+
+      return;
+
     }
 
-    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SR) return;
+    const recognition = new SpeechRecognition();
 
-    const startEngine = () => {
-      if (recognitionRef.current) return;
+    recognition.continuous = true;
 
-      const rec = new SR();
-      rec.continuous = true;
-      rec.interimResults = false; // Isko safe false rakha taaki freeze na ho browser frame
-      rec.lang = "en-US";
+    recognition.interimResults = false;
 
-      rec.onresult = (event: any) => {
-        setVoiceActive(true);
-        const resultIndex = event.resultIndex !== undefined ? event.resultIndex : event.results.length - 1;
-        const resultRow = event.results[resultIndex];
-        if (!resultRow) return;
-        
-        const text = resultRow[0]?.transcript ? resultRow[0].transcript.trim() : "";
-        if (!text) return;
+    recognition.lang = "en-US";
 
-        console.log("🎤 USER SAID:", text);
-        setCommand(text);
-        setVoiceActive(false);
+    recognitionRef.current = recognition;
 
-        const normalized = text.toLowerCase();
-        const matchedRoute = commandRoutes.find((route) => 
-          route.labels.some((label) => normalized.includes(label))
-        );
+    recognition.onstart = () => {
 
-        if (matchedRoute) {
-          setResponse(matchedRoute.response);
-          speak(matchedRoute.response);
-        } else {
-          askLocalAI(text, setResponse);
-        }
-      };
+      setState("listening");
 
-      rec.onend = () => {
-        setVoiceActive(false);
-        recognitionRef.current = null;
-        if ((window as any).__orion_active_guard__) startEngine();
-      };
+      console.log("🎤 Listening...");
 
-      rec.onerror = (event: any) => {
-        if (event.error === "no-speech" || event.error === "aborted") {
-          try { rec.stop(); } catch(e){}
-        }
-      };
-
-      recognitionRef.current = rec;
-      try { rec.start(); } catch (e) {}
     };
 
-    (window as any).__orion_active_guard__ = true;
-    startEngine();
+    recognition.onresult = async (event: any) => {
+
+      if (speakingRef.current) return;
+
+      const text =
+        event.results[event.results.length - 1][0].transcript.trim();
+
+      if (!text) return;
+
+      recognition.stop();
+
+      setTranscript(text);
+
+      setState("thinking");
+
+      console.log("USER:", text);
+
+      try {
+
+        const reply = await askOrion(text);
+
+        setResponse(reply);
+
+        setState("speaking");
+
+        speakingRef.current = true;
+
+        console.log("ORION:", reply);
+
+        await speak(reply);
+
+      } catch (err) {
+
+        console.error(err);
+
+        await speak("Connection error.");
+
+      }
+
+      speakingRef.current = false;
+
+      recognition.start();
+
+    };
+
+    recognition.onerror = (e: any) => {
+
+      console.log(e.error);
+
+    };
+
+    recognition.onend = () => {
+
+  console.log("Recognition Ended");
+
+};
+    recognition.start();
 
     return () => {
-      (window as any).__orion_active_guard__ = false;
-      if (recognitionRef.current) {
-        recognitionRef.current.onend = null;
-        try { recognitionRef.current.stop(); } catch(e){}
-      }
+
+      recognition.stop();
+
     };
-  }, [setCommand, setResponse, setVoiceActive]);
+
+  }, []);
 
   return null;
+
 }

@@ -75,7 +75,7 @@ export default function Neural() {
           color="#4fd8ff"
           size={0.06} // Dots ka size thoda normal kiya taaki clean futuristic look aaye
           transparent
-          opacity={0.7}
+          opacity={0.9}
           depthWrite={false}
           blending={THREE.AdditiveBlending}
         />

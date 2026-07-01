@@ -11,8 +11,8 @@ export default function FloorGrid() {
       sectionSize={5}
       sectionThickness={1}
       sectionColor="#00ffff"
-      fadeDistance={40}
-      fadeStrength={1}
+      fadeDistance={80}
+      fadeStrength={0.5}
       infiniteGrid
     />
   );
