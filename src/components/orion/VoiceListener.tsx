@@ -2,24 +2,28 @@ import { useEffect, useRef } from "react";
 import { streamOrion } from "../../services/orionAPI";
 import { useOrionStore } from "../../store/orionStore";
 import { speakIgris } from "../../services/voiceService";
+import { createEnglishResponseInstruction } from "../../services/languageService";
 
 interface Props {
-  language: string;
   onSleep: () => void;
 }
 
-const SLEEP_DELAY = 15000;
+const SLEEP_DELAY = 15_000;
 const MIC_RESTART_DELAY = 700;
+const INTERRUPT_RESTART_DELAY = 350;
 
-export default function VoiceListener({ language, onSleep }: Props) {
+export default function VoiceListener({ onSleep }: Props) {
   const recognitionRef = useRef<any>(null);
+  const interruptRecognitionRef = useRef<any>(null);
 
   const speakingRef = useRef(false);
   const speakingNowRef = useRef(false);
   const processingRef = useRef(false);
   const sleepingRef = useRef(false);
-  const shouldRestartRef = useRef(false);
   const mountedRef = useRef(true);
+
+  const shouldRestartRef = useRef(false);
+  const interruptEnabledRef = useRef(false);
 
   const speechQueueRef = useRef<string[]>([]);
   const sentenceBufferRef = useRef("");
@@ -27,12 +31,20 @@ export default function VoiceListener({ language, onSleep }: Props) {
 
   const sleepTimerRef = useRef<number | null>(null);
   const restartTimerRef = useRef<number | null>(null);
+  const interruptRestartTimerRef = useRef<number | null>(null);
+
+  // Used to ignore old streaming callbacks after interruption.
+  const streamSessionRef = useRef(0);
 
   const onSleepRef = useRef(onSleep);
 
-  const setState = useOrionStore((s) => s.setState);
-  const setTranscript = useOrionStore((s) => s.setTranscript);
-  const setResponse = useOrionStore((s) => s.setResponse);
+  const setState = useOrionStore((state) => state.setState);
+  const setTranscript = useOrionStore(
+    (state) => state.setTranscript
+  );
+  const setResponse = useOrionStore(
+    (state) => state.setResponse
+  );
 
   const setStateRef = useRef(setState);
   const setTranscriptRef = useRef(setTranscript);
@@ -62,7 +74,17 @@ export default function VoiceListener({ language, onSleep }: Props) {
     }
   }
 
-  function stopRecognition() {
+  function clearInterruptRestartTimer() {
+    if (interruptRestartTimerRef.current !== null) {
+      window.clearTimeout(
+        interruptRestartTimerRef.current
+      );
+
+      interruptRestartTimerRef.current = null;
+    }
+  }
+
+  function stopMainRecognition() {
     shouldRestartRef.current = false;
     clearRestartTimer();
 
@@ -73,44 +95,68 @@ export default function VoiceListener({ language, onSleep }: Props) {
     }
   }
 
-  function enterSleepMode() {
-    if (sleepingRef.current) return;
-
-    sleepingRef.current = true;
-    processingRef.current = false;
-    speakingRef.current = false;
-    shouldRestartRef.current = false;
-
-    clearSleepTimer();
-    clearRestartTimer();
+  function stopInterruptRecognition() {
+    interruptEnabledRef.current = false;
+    clearInterruptRestartTimer();
 
     try {
-      recognitionRef.current?.abort();
-    } catch {}
-
-    window.speechSynthesis.cancel();
-    speechQueueRef.current = [];
-    sentenceBufferRef.current = "";
-
-    setStateRef.current("idle");
-
-    console.log("😴 VoiceListener entering sleep mode.");
-
-    onSleepRef.current();
+      interruptRecognitionRef.current?.abort();
+    } catch {
+      // Interrupt recognition may already be stopped.
+    }
   }
 
   function scheduleSleepTimer() {
     clearSleepTimer();
 
     sleepTimerRef.current = window.setTimeout(() => {
-      console.log("⏳ No command received for 15 seconds.");
+      console.log(
+        "⏳ No command received for 15 seconds."
+      );
+
       enterSleepMode();
     }, SLEEP_DELAY);
 
-    console.log("⏳ Sleep timeout reset: 15 seconds.");
+    console.log(
+      "⏳ Sleep timeout reset: 15 seconds."
+    );
   }
 
-  function startRecognition(delay = 0) {
+  function enterSleepMode() {
+    if (sleepingRef.current) return;
+
+    sleepingRef.current = true;
+    processingRef.current = false;
+    speakingRef.current = false;
+    speakingNowRef.current = false;
+    shouldRestartRef.current = false;
+
+    // Invalidate active AI stream.
+    streamSessionRef.current += 1;
+
+    clearSleepTimer();
+    clearRestartTimer();
+    clearInterruptRestartTimer();
+
+    stopMainRecognition();
+    stopInterruptRecognition();
+
+    window.speechSynthesis.cancel();
+
+    speechQueueRef.current = [];
+    sentenceBufferRef.current = "";
+    fullResponseRef.current = "";
+
+    setStateRef.current("idle");
+
+    console.log(
+      "😴 VoiceListener entering sleep mode."
+    );
+
+    onSleepRef.current();
+  }
+
+  function startMainRecognition(delay = 0) {
     if (
       !mountedRef.current ||
       sleepingRef.current ||
@@ -140,18 +186,81 @@ export default function VoiceListener({ language, onSleep }: Props) {
       try {
         recognitionRef.current?.start();
       } catch {
-        // Already running.
+        // Recognition is probably already active.
       }
     }, delay);
   }
 
+  function startInterruptRecognition(delay = 0) {
+    if (
+      !mountedRef.current ||
+      sleepingRef.current ||
+      !speakingRef.current
+    ) {
+      return;
+    }
+
+    interruptEnabledRef.current = true;
+    clearInterruptRestartTimer();
+
+    interruptRestartTimerRef.current =
+      window.setTimeout(() => {
+        if (
+          !mountedRef.current ||
+          sleepingRef.current ||
+          !speakingRef.current ||
+          !interruptEnabledRef.current
+        ) {
+          return;
+        }
+
+        try {
+          interruptRecognitionRef.current?.start();
+
+          console.log(
+            "👂 Interrupt listener active."
+          );
+        } catch {
+          // Interrupt listener is probably already active.
+        }
+      }, delay);
+  }
+
+  function handleVoiceInterrupt() {
+    if (!speakingRef.current) return;
+
+    console.warn(
+      "🛑 IGRIS interrupted by user."
+    );
+
+    // Invalidate current stream callbacks.
+    streamSessionRef.current += 1;
+
+    stopInterruptRecognition();
+
+    window.speechSynthesis.cancel();
+
+    speechQueueRef.current = [];
+    sentenceBufferRef.current = "";
+    fullResponseRef.current = "";
+
+    speakingNowRef.current = false;
+    speakingRef.current = false;
+    processingRef.current = false;
+
+    setStateRef.current("listening");
+
+    startMainRecognition(MIC_RESTART_DELAY);
+    scheduleSleepTimer();
+  }
+
   function speak(text: string): Promise<void> {
-  return speakIgris(text, {
-    rate: 1.05,
-    pitch: 1,
-    volume: 1,
-  });
-}
+    return speakIgris(text, {
+      rate: 0.95,
+      pitch: 0.9,
+      volume: 1,
+    });
+  }
 
   async function drainSpeechQueue(): Promise<void> {
     if (speakingNowRef.current) return;
@@ -159,9 +268,18 @@ export default function VoiceListener({ language, onSleep }: Props) {
     speakingNowRef.current = true;
     speakingRef.current = true;
 
+    startInterruptRecognition(
+      INTERRUPT_RESTART_DELAY
+    );
+
     try {
-      while (speechQueueRef.current.length > 0) {
-        const sentence = speechQueueRef.current.shift();
+      while (
+        mountedRef.current &&
+        speakingRef.current &&
+        speechQueueRef.current.length > 0
+      ) {
+        const sentence =
+          speechQueueRef.current.shift();
 
         if (!sentence) continue;
 
@@ -170,8 +288,11 @@ export default function VoiceListener({ language, onSleep }: Props) {
     } finally {
       speakingNowRef.current = false;
 
-      // A new sentence may have arrived while the function was finishing.
-      if (speechQueueRef.current.length > 0) {
+      if (
+        mountedRef.current &&
+        speakingRef.current &&
+        speechQueueRef.current.length > 0
+      ) {
         void drainSpeechQueue();
       }
     }
@@ -198,6 +319,7 @@ export default function VoiceListener({ language, onSleep }: Props) {
     if (!cleanText) return;
 
     speechQueueRef.current.push(cleanText);
+
     void drainSpeechQueue();
   }
 
@@ -210,17 +332,122 @@ export default function VoiceListener({ language, onSleep }: Props) {
       (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("Speech recognition is not supported by this browser.");
+      alert(
+        "Speech recognition is not supported by this browser."
+      );
+
       return;
     }
 
     const recognition = new SpeechRecognition();
+    const interruptRecognition =
+      new SpeechRecognition();
 
     recognition.continuous = true;
     recognition.interimResults = false;
-    recognition.lang = language;
+
+    // User can speak Hindi/Hinglish.
+    recognition.lang = "hi-IN";
+
+    interruptRecognition.continuous = true;
+    interruptRecognition.interimResults = true;
+    interruptRecognition.lang = "en-IN";
 
     recognitionRef.current = recognition;
+    interruptRecognitionRef.current =
+      interruptRecognition;
+
+    interruptRecognition.onstart = () => {
+      console.log(
+        "👂 Listening for interrupt commands."
+      );
+    };
+
+    interruptRecognition.onresult = (
+      event: any
+    ) => {
+      if (
+        sleepingRef.current ||
+        !speakingRef.current ||
+        !interruptEnabledRef.current
+      ) {
+        return;
+      }
+
+      let transcript = "";
+
+      for (
+        let index = event.resultIndex;
+        index < event.results.length;
+        index++
+      ) {
+        transcript +=
+          event.results[index]?.[0]?.transcript ??
+          "";
+      }
+
+      const normalizedTranscript = transcript
+        .toLowerCase()
+        .trim();
+
+      if (!normalizedTranscript) return;
+
+      console.log(
+        "Interrupt listener heard:",
+        normalizedTranscript
+      );
+
+      const interruptCommands = [
+        "stop",
+        "stop igris",
+        "igris stop",
+        "wait",
+        "wait igris",
+        "shut up",
+        "be quiet",
+        "बस",
+        "रुको",
+        "चुप",
+      ];
+
+      const interruptMatched =
+        interruptCommands.some(
+          (command) =>
+            normalizedTranscript === command ||
+            normalizedTranscript.includes(command)
+        );
+
+      if (interruptMatched) {
+        handleVoiceInterrupt();
+      }
+    };
+
+    interruptRecognition.onerror = (
+      event: any
+    ) => {
+      if (
+        event.error === "aborted" ||
+        event.error === "no-speech"
+      ) {
+        return;
+      }
+
+      console.log(
+        "Interrupt recognition error:",
+        event.error
+      );
+    };
+
+    interruptRecognition.onend = () => {
+      if (
+        mountedRef.current &&
+        interruptEnabledRef.current &&
+        speakingRef.current &&
+        !sleepingRef.current
+      ) {
+        startInterruptRecognition(300);
+      }
+    };
 
     recognition.onstart = () => {
       if (
@@ -232,10 +459,15 @@ export default function VoiceListener({ language, onSleep }: Props) {
       }
 
       setStateRef.current("listening");
-      console.log("🎙️ IGRIS listening for a command.");
+
+      console.log(
+        "🎙️ IGRIS listening for a command."
+      );
     };
 
-    recognition.onresult = async (event: any) => {
+    recognition.onresult = async (
+      event: any
+    ) => {
       if (
         sleepingRef.current ||
         processingRef.current ||
@@ -243,22 +475,28 @@ export default function VoiceListener({ language, onSleep }: Props) {
         speakingNowRef.current ||
         window.speechSynthesis.speaking
       ) {
-        console.log("🔒 Audio ignored while IGRIS is busy.");
+        console.log(
+          "Audio ignored while IGRIS is busy."
+        );
+
         return;
       }
 
       const resultIndex = event.resultIndex;
-      const result = event.results?.[resultIndex]?.[0];
+      const result =
+        event.results?.[resultIndex]?.[0];
 
       if (!result?.transcript) return;
 
-      let input = result.transcript.trim();
+      const input = result.transcript.trim();
 
       if (!input) return;
 
-      console.log("🔊 User command:", input);
+      console.log("User command:", input);
 
-      const normalizedInput = input.toLowerCase().trim();
+      const normalizedInput = input
+        .toLowerCase()
+        .trim();
 
       const wakeOnlyPhrases = new Set([
         "igris",
@@ -273,35 +511,34 @@ export default function VoiceListener({ language, onSleep }: Props) {
         "igrees",
       ]);
 
-      // Ignore a wake phrase repeated by SpeechRecognition.
       if (wakeOnlyPhrases.has(normalizedInput)) {
-        console.log("Wake phrase tail ignored.");
+        console.log(
+          "Wake phrase tail ignored."
+        );
+
         scheduleSleepTimer();
         return;
       }
 
-      if (
-        normalizedInput === "stop" ||
-        normalizedInput === "shut up" ||
-        normalizedInput === "wait" ||
-        normalizedInput === "igris stop"
-      ) {
-        console.log("🛑 Speech interrupted.");
+      const stopCommands = [
+        "stop",
+        "shut up",
+        "wait",
+        "igris stop",
+        "stop igris",
+        "बस",
+        "रुको",
+        "चुप",
+      ];
 
-        window.speechSynthesis.cancel();
+      const stopMatched = stopCommands.some(
+        (command) =>
+          normalizedInput === command ||
+          normalizedInput.includes(command)
+      );
 
-        speechQueueRef.current = [];
-        sentenceBufferRef.current = "";
-        fullResponseRef.current = "";
-
-        speakingRef.current = false;
-        speakingNowRef.current = false;
-        processingRef.current = false;
-
-        setStateRef.current("listening");
-
-        startRecognition(MIC_RESTART_DELAY);
-        scheduleSleepTimer();
+      if (stopMatched) {
+        handleVoiceInterrupt();
         return;
       }
 
@@ -310,8 +547,8 @@ export default function VoiceListener({ language, onSleep }: Props) {
       processingRef.current = true;
       speakingRef.current = true;
 
-      // Critical: mic must remain stopped during processing and speaking.
-      stopRecognition();
+      stopMainRecognition();
+      stopInterruptRecognition();
 
       window.speechSynthesis.cancel();
 
@@ -324,46 +561,97 @@ export default function VoiceListener({ language, onSleep }: Props) {
       setResponseRef.current("");
       setStateRef.current("thinking");
 
-      console.log("🧠 Sending command to IGRIS:", input);
+      console.log(
+        "Sending command to IGRIS:",
+        input
+      );
+
+      const modelInput =
+        createEnglishResponseInstruction(input);
+
+      const currentStreamSession =
+        ++streamSessionRef.current;
 
       try {
         await streamOrion(
-          input,
+          modelInput,
 
           (token) => {
-            if (sleepingRef.current) return;
+            if (
+              !mountedRef.current ||
+              sleepingRef.current ||
+              currentStreamSession !==
+                streamSessionRef.current
+            ) {
+              return;
+            }
 
             setStateRef.current("speaking");
 
             fullResponseRef.current += token;
-            setResponseRef.current(fullResponseRef.current);
+
+            setResponseRef.current(
+              fullResponseRef.current
+            );
 
             sentenceBufferRef.current += token;
 
-            const wordCount = sentenceBufferRef.current
-              .trim()
-              .split(/\s+/)
-              .filter(Boolean).length;
+            const wordCount =
+              sentenceBufferRef.current
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean).length;
 
-            const terminalMark = /[.!?]/.test(token);
-            const pauseMark = /[,;:]/.test(token) && wordCount >= 8;
+            const hasTerminalMark =
+              /[.!?]/.test(token);
 
-            if (terminalMark || pauseMark || wordCount >= 12) {
-              addSpeechChunk(sentenceBufferRef.current);
+            const hasPauseMark =
+              /[,;:]/.test(token) &&
+              wordCount >= 8;
+
+            if (
+              hasTerminalMark ||
+              hasPauseMark ||
+              wordCount >= 12
+            ) {
+              addSpeechChunk(
+                sentenceBufferRef.current
+              );
+
               sentenceBufferRef.current = "";
             }
           },
 
           async () => {
-            if (sentenceBufferRef.current.trim()) {
-              addSpeechChunk(sentenceBufferRef.current);
+            if (
+              currentStreamSession !==
+              streamSessionRef.current
+            ) {
+              return;
+            }
+
+            if (
+              sentenceBufferRef.current.trim()
+            ) {
+              addSpeechChunk(
+                sentenceBufferRef.current
+              );
+
               sentenceBufferRef.current = "";
             }
 
-            // Wait until every spoken sentence has really completed.
             await waitForSpeechToFinish();
 
-            if (!mountedRef.current || sleepingRef.current) return;
+            if (
+              !mountedRef.current ||
+              sleepingRef.current ||
+              currentStreamSession !==
+                streamSessionRef.current
+            ) {
+              return;
+            }
+
+            stopInterruptRecognition();
 
             speakingRef.current = false;
             speakingNowRef.current = false;
@@ -371,17 +659,31 @@ export default function VoiceListener({ language, onSleep }: Props) {
 
             setStateRef.current("listening");
 
-            console.log("✅ IGRIS finished speaking. Mic will reopen.");
+            console.log(
+              "✅ IGRIS finished speaking. Mic will reopen."
+            );
 
-            // Small delay prevents the final speaker audio from entering mic.
-            startRecognition(MIC_RESTART_DELAY);
+            startMainRecognition(
+              MIC_RESTART_DELAY
+            );
 
-            // Sleep only after 15 seconds without another command.
             scheduleSleepTimer();
           }
         );
       } catch (error) {
-        console.error("IGRIS pipeline error:", error);
+        if (
+          currentStreamSession !==
+          streamSessionRef.current
+        ) {
+          return;
+        }
+
+        console.error(
+          "IGRIS pipeline error:",
+          error
+        );
+
+        stopInterruptRecognition();
 
         window.speechSynthesis.cancel();
 
@@ -394,13 +696,19 @@ export default function VoiceListener({ language, onSleep }: Props) {
 
         setStateRef.current("listening");
 
-        startRecognition(MIC_RESTART_DELAY);
+        startMainRecognition(
+          MIC_RESTART_DELAY
+        );
+
         scheduleSleepTimer();
       }
     };
 
     recognition.onerror = (event: any) => {
-      console.log("Speech recognition error:", event.error);
+      console.log(
+        "Speech recognition error:",
+        event.error
+      );
 
       if (
         event.error === "aborted" ||
@@ -415,14 +723,15 @@ export default function VoiceListener({ language, onSleep }: Props) {
         !processingRef.current &&
         !speakingRef.current
       ) {
-        startRecognition(800);
+        startMainRecognition(800);
       }
     };
 
     recognition.onend = () => {
-      console.log("Microphone recognition session ended.");
+      console.log(
+        "Microphone recognition session ended."
+      );
 
-      // Restart only when the system explicitly allows it.
       if (
         shouldRestartRef.current &&
         !sleepingRef.current &&
@@ -431,37 +740,50 @@ export default function VoiceListener({ language, onSleep }: Props) {
         !speakingNowRef.current &&
         !window.speechSynthesis.speaking
       ) {
-        startRecognition(300);
+        startMainRecognition(300);
       }
     };
 
-    // VoiceListener is mounted only after WakeEngine activates IGRIS.
-    startRecognition(700);
+    startMainRecognition(700);
     scheduleSleepTimer();
 
     return () => {
       mountedRef.current = false;
       sleepingRef.current = true;
       shouldRestartRef.current = false;
+      interruptEnabledRef.current = false;
+
+      streamSessionRef.current += 1;
 
       clearSleepTimer();
       clearRestartTimer();
+      clearInterruptRestartTimer();
 
       recognition.onstart = null;
       recognition.onresult = null;
       recognition.onerror = null;
       recognition.onend = null;
 
+      interruptRecognition.onstart = null;
+      interruptRecognition.onresult = null;
+      interruptRecognition.onerror = null;
+      interruptRecognition.onend = null;
+
       try {
         recognition.abort();
+      } catch {}
+
+      try {
+        interruptRecognition.abort();
       } catch {}
 
       window.speechSynthesis.cancel();
 
       speechQueueRef.current = [];
       sentenceBufferRef.current = "";
+      fullResponseRef.current = "";
     };
-  }, [language]);
+  }, []);
 
   return null;
 }

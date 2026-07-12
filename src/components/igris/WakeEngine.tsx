@@ -3,7 +3,6 @@ import { speakIgris } from "../../services/voiceService";
 import { useOrionStore } from "../../store/orionStore";
 
 interface Props {
-  language: string;
   onWake: () => void;
 }
 
@@ -28,7 +27,7 @@ const MIN_CLAP_GAP = 220;
 const MAX_CLAP_GAP = 900;
 const CLAP_DEBOUNCE = 180;
 
-export default function WakeEngine({ language, onWake }: Props) {
+export default function WakeEngine({ onWake }: Props) {
   const recognitionRef = useRef<any>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -97,9 +96,9 @@ async function speakWakeGreeting(
   source: "voice" | "double-clap"
 ): Promise<void> {
   const message =
-    source === "double-clap"
-      ? "Hello Lucifer, how can I help you today?"
-      : "Yes Lucifer, I'm listening.";
+  source === "double-clap"
+    ? "Welcome Back MASTER. I am ready to follow your commands. What are we building today?"
+    : "Yes Lucifer, main sun raha hoon.";
 
   // Greeting ko HUD/chat me show karo.
   const store = useOrionStore.getState();
@@ -109,11 +108,11 @@ async function speakWakeGreeting(
   store.setState("speaking");
 
   await speakIgris(message, {
-    rate: 1.05,
-    pitch: 1,
-    volume: 1,
-    cancelBeforeSpeak: true,
-  });
+  rate: 0.95,
+  pitch: 0.88,
+  volume: 1,
+  cancelBeforeSpeak: true,
+});
 }
 
 async function triggerWake(
@@ -158,7 +157,7 @@ async function triggerWake(
 
     recognition.continuous = true;
     recognition.interimResults = false;
-    recognition.lang = language;
+    recognition.lang = "en-IN";
 
     recognitionRef.current = recognition;
 
@@ -429,7 +428,7 @@ async function triggerWake(
       stopSpeechWake();
       stopClapDetector();
     };
-  }, [language]);
+  }, []);
 
   return null;
 }
