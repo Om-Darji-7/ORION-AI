@@ -17,5 +17,5 @@ app.get("/", (req, res) => {
 const PORT = 5000;
 
 app.listen(PORT, () => {
-  console.log(`🚀 ORION Backend running on ${PORT}`);
+  console.log(`🚀 IGRIS Backend running on ${PORT}`);
 });

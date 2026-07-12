@@ -9,7 +9,7 @@ export default function BottomPanel() {
       className="orion-console"
       style={{ left: 'auto', right: '20px', transform: 'none', width: '500px' }} 
     >
-      <span className="prompt">{"ORION >"}</span>
+      <span className="prompt">{"IGRIS >"}</span>
       <span className="typing">
         {/* Dynamic Display Loop: Pehle user ka text dikhega, fir AI ka response */}
         {aiResponse ? aiResponse : (currentCommand ? currentCommand : "Awaiting Command...")}

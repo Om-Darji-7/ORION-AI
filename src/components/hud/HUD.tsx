@@ -4,7 +4,6 @@ import RightPanel from "./RightPanel";
 import BottomPanel from "./BottomPanel";
 import Radar from "./Radar";
 import Corners from "./Corners";
-import VoiceRing from "./VoiceRing";
 import DataCard from "./DataCard";
 
 export default function HUD() {

@@ -2,7 +2,7 @@ export default function TopBar() {
   return (
     <div className="orion-header">
       <div className="logo">
-        ORION AI
+        IGRIS AI
       </div>
 
       <div className="status">
