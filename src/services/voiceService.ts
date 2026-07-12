@@ -5,20 +5,23 @@ interface SpeakOptions {
   cancelBeforeSpeak?: boolean;
 }
 
-async function loadVoices(): Promise<SpeechSynthesisVoice[]> {
-  const existingVoices = window.speechSynthesis.getVoices();
+let cachedVoice: SpeechSynthesisVoice | null = null;
 
-  if (existingVoices.length > 0) {
-    return existingVoices;
+async function loadVoices(): Promise<SpeechSynthesisVoice[]> {
+  const voices = window.speechSynthesis.getVoices();
+
+  if (voices.length > 0) {
+    return voices;
   }
 
   return new Promise((resolve) => {
-    let resolved = false;
+    let completed = false;
 
     const finish = () => {
-      if (resolved) return;
+      if (completed) return;
 
-      resolved = true;
+      completed = true;
+
       window.speechSynthesis.removeEventListener(
         "voiceschanged",
         finish
@@ -32,38 +35,56 @@ async function loadVoices(): Promise<SpeechSynthesisVoice[]> {
       finish
     );
 
-    window.setTimeout(finish, 800);
+    window.setTimeout(finish, 1200);
   });
 }
 
-function selectIgrisVoice(
+function selectEnglishVoice(
   voices: SpeechSynthesisVoice[]
 ): SpeechSynthesisVoice | null {
-  const preferredVoiceNames = [
+  if (cachedVoice) {
+    return cachedVoice;
+  }
+
+  const preferredVoices = [
+    "Microsoft Ravi",
+    "Microsoft Prabhat",
+    "Google English India",
     "Microsoft David",
     "Microsoft Mark",
     "Google UK English Male",
-    "Daniel",
-    "Alex",
   ];
 
-  for (const preferredName of preferredVoiceNames) {
+  for (const preferredName of preferredVoices) {
     const voice = voices.find((item) =>
       item.name
         .toLowerCase()
         .includes(preferredName.toLowerCase())
     );
 
-    if (voice) return voice;
+    if (voice) {
+      cachedVoice = voice;
+      return voice;
+    }
   }
 
-  return (
-    voices.find((voice) => voice.lang === "en-GB") ||
-    voices.find((voice) => voice.lang === "en-US") ||
-    voices.find((voice) => voice.lang.startsWith("en")) ||
-    voices[0] ||
-    null
+  const indianEnglishVoice = voices.find(
+    (voice) =>
+      voice.lang.toLowerCase() === "en-in"
   );
+
+  if (indianEnglishVoice) {
+    cachedVoice = indianEnglishVoice;
+    return indianEnglishVoice;
+  }
+
+  const englishVoice = voices.find((voice) =>
+    voice.lang.toLowerCase().startsWith("en")
+  );
+
+  cachedVoice = englishVoice || voices[0] || null;
+
+  return cachedVoice;
 }
 
 export async function speakIgris(
@@ -75,8 +96,8 @@ export async function speakIgris(
   if (!cleanText) return;
 
   const {
-    rate = 1.05,
-    pitch = 1,
+    rate = 1,
+    pitch = 0.9,
     volume = 1,
     cancelBeforeSpeak = false,
   } = options;
@@ -86,14 +107,22 @@ export async function speakIgris(
   }
 
   const voices = await loadVoices();
-  const selectedVoice = selectIgrisVoice(voices);
+  const selectedVoice = selectEnglishVoice(voices);
+
+  console.log(
+    "🔊 IGRIS English Voice:",
+    selectedVoice?.name || "browser default",
+    selectedVoice?.lang || "unknown"
+  );
 
   return new Promise((resolve) => {
-    const utterance = new SpeechSynthesisUtterance(cleanText);
+    const utterance =
+      new SpeechSynthesisUtterance(cleanText);
+
+    utterance.lang = "en-IN";
 
     if (selectedVoice) {
       utterance.voice = selectedVoice;
-      utterance.lang = selectedVoice.lang;
     }
 
     utterance.rate = rate;
