@@ -8,40 +8,61 @@ interface Props {
   onSleep: () => void;
 }
 
-const SLEEP_DELAY = 15_000;
 const MIC_RESTART_DELAY = 700;
-const INTERRUPT_RESTART_DELAY = 350;
+const INTERRUPT_RESTART_DELAY = 300;
+
+const WAKE_ONLY_PHRASES = new Set([
+  "igris",
+  "hey igris",
+  "hello igris",
+  "wake up igris",
+  "ok igris",
+  "listen igris",
+  "idris",
+  "egress",
+  "igress",
+  "इग्रिस",
+  "आईग्रिस",
+  "इग्निस",
+]);
 
 export default function VoiceListener({ onSleep }: Props) {
   const recognitionRef = useRef<any>(null);
   const interruptRecognitionRef = useRef<any>(null);
 
+  const mountedRef = useRef(true);
+  const sleepingRef = useRef(false);
+  const processingRef = useRef(false);
   const speakingRef = useRef(false);
   const speakingNowRef = useRef(false);
-  const processingRef = useRef(false);
-  const sleepingRef = useRef(false);
-  const mountedRef = useRef(true);
 
-  const shouldRestartRef = useRef(false);
-  const interruptEnabledRef = useRef(false);
+  const recognitionRunningRef = useRef(false);
+  const interruptRunningRef = useRef(false);
+
+  const shouldRestartRef = useRef(true);
+  const interruptAllowedRef = useRef(false);
+
+  const restartTimerRef = useRef<number | null>(null);
+  const interruptRestartTimerRef =
+    useRef<number | null>(null);
 
   const speechQueueRef = useRef<string[]>([]);
   const sentenceBufferRef = useRef("");
   const fullResponseRef = useRef("");
 
-  const sleepTimerRef = useRef<number | null>(null);
-  const restartTimerRef = useRef<number | null>(null);
-  const interruptRestartTimerRef = useRef<number | null>(null);
-
-  // Used to ignore old streaming callbacks after interruption.
+  // Incrementing this invalidates callbacks from an old AI stream.
   const streamSessionRef = useRef(0);
 
   const onSleepRef = useRef(onSleep);
 
-  const setState = useOrionStore((state) => state.setState);
+  const setState = useOrionStore(
+    (state) => state.setState
+  );
+
   const setTranscript = useOrionStore(
     (state) => state.setTranscript
   );
+
   const setResponse = useOrionStore(
     (state) => state.setResponse
   );
@@ -60,22 +81,55 @@ export default function VoiceListener({ onSleep }: Props) {
     setResponseRef.current = setResponse;
   }, [setState, setTranscript, setResponse]);
 
-  function clearSleepTimer() {
-    if (sleepTimerRef.current !== null) {
-      window.clearTimeout(sleepTimerRef.current);
-      sleepTimerRef.current = null;
-    }
+  function normalizeCommand(text: string): string {
+    return text
+      .normalize("NFC")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function containsRelaxWord(text: string): boolean {
+    const command = normalizeCommand(text);
+
+    const relaxVariants = [
+      "relax",
+      "go to sleep",
+      "sleep",
+      "standby",
+      "stand by",
+      "रिलैक्स",
+      "रिलेक्स",
+      "आराम करो",
+      "आराम",
+      "सो जाओ",
+      "स्टैंडबाय",
+    ];
+
+    return relaxVariants.some((word) =>
+      command.includes(normalizeCommand(word))
+    );
+  }
+
+  function isRelaxCommand(text: string): boolean {
+    return containsRelaxWord(text);
   }
 
   function clearRestartTimer() {
     if (restartTimerRef.current !== null) {
-      window.clearTimeout(restartTimerRef.current);
+      window.clearTimeout(
+        restartTimerRef.current
+      );
+
       restartTimerRef.current = null;
     }
   }
 
   function clearInterruptRestartTimer() {
-    if (interruptRestartTimerRef.current !== null) {
+    if (
+      interruptRestartTimerRef.current !== null
+    ) {
       window.clearTimeout(
         interruptRestartTimerRef.current
       );
@@ -84,7 +138,45 @@ export default function VoiceListener({ onSleep }: Props) {
     }
   }
 
-  function stopMainRecognition() {
+  function startRecognition(delay = 0) {
+    if (
+      !mountedRef.current ||
+      sleepingRef.current ||
+      !shouldRestartRef.current ||
+      processingRef.current ||
+      speakingRef.current ||
+      speakingNowRef.current ||
+      window.speechSynthesis.speaking
+    ) {
+      return;
+    }
+
+    clearRestartTimer();
+
+    restartTimerRef.current =
+      window.setTimeout(() => {
+        if (
+          !mountedRef.current ||
+          sleepingRef.current ||
+          !shouldRestartRef.current ||
+          recognitionRunningRef.current ||
+          processingRef.current ||
+          speakingRef.current ||
+          speakingNowRef.current ||
+          window.speechSynthesis.speaking
+        ) {
+          return;
+        }
+
+        try {
+          recognitionRef.current?.start();
+        } catch {
+          // Recognition may already be starting.
+        }
+      }, delay);
+  }
+
+  function pauseMainRecognition() {
     shouldRestartRef.current = false;
     clearRestartTimer();
 
@@ -95,112 +187,44 @@ export default function VoiceListener({ onSleep }: Props) {
     }
   }
 
-  function stopInterruptRecognition() {
-    interruptEnabledRef.current = false;
-    clearInterruptRestartTimer();
-
-    try {
-      interruptRecognitionRef.current?.abort();
-    } catch {
-      // Interrupt recognition may already be stopped.
-    }
-  }
-
-  function scheduleSleepTimer() {
-    clearSleepTimer();
-
-    sleepTimerRef.current = window.setTimeout(() => {
-      console.log(
-        "⏳ No command received for 15 seconds."
-      );
-
-      enterSleepMode();
-    }, SLEEP_DELAY);
-
-    console.log(
-      "⏳ Sleep timeout reset: 15 seconds."
-    );
-  }
-
-  function enterSleepMode() {
-    if (sleepingRef.current) return;
-
-    sleepingRef.current = true;
-    processingRef.current = false;
-    speakingRef.current = false;
-    speakingNowRef.current = false;
-    shouldRestartRef.current = false;
-
-    // Invalidate active AI stream.
-    streamSessionRef.current += 1;
-
-    clearSleepTimer();
-    clearRestartTimer();
-    clearInterruptRestartTimer();
-
-    stopMainRecognition();
-    stopInterruptRecognition();
-
-    window.speechSynthesis.cancel();
-
-    speechQueueRef.current = [];
-    sentenceBufferRef.current = "";
-    fullResponseRef.current = "";
-
-    setStateRef.current("idle");
-
-    console.log(
-      "😴 VoiceListener entering sleep mode."
-    );
-
-    onSleepRef.current();
-  }
-
-  function startMainRecognition(delay = 0) {
+  function resumeMainRecognition(
+    delay = MIC_RESTART_DELAY
+  ) {
     if (
       !mountedRef.current ||
-      sleepingRef.current ||
-      processingRef.current ||
-      speakingRef.current ||
-      speakingNowRef.current ||
-      window.speechSynthesis.speaking
+      sleepingRef.current
     ) {
       return;
     }
 
     shouldRestartRef.current = true;
-    clearRestartTimer();
-
-    restartTimerRef.current = window.setTimeout(() => {
-      if (
-        !mountedRef.current ||
-        sleepingRef.current ||
-        processingRef.current ||
-        speakingRef.current ||
-        speakingNowRef.current ||
-        window.speechSynthesis.speaking
-      ) {
-        return;
-      }
-
-      try {
-        recognitionRef.current?.start();
-      } catch {
-        // Recognition is probably already active.
-      }
-    }, delay);
+    startRecognition(delay);
   }
 
-  function startInterruptRecognition(delay = 0) {
+  function stopMainRecognitionPermanently() {
+    shouldRestartRef.current = false;
+    clearRestartTimer();
+
+    try {
+      recognitionRef.current?.abort();
+    } catch {
+      // Recognition may already be inactive.
+    }
+  }
+
+  function startInterruptRecognition(
+    delay = INTERRUPT_RESTART_DELAY
+  ) {
     if (
       !mountedRef.current ||
       sleepingRef.current ||
-      !speakingRef.current
+      !interruptAllowedRef.current ||
+      !speakingRef.current ||
+      interruptRunningRef.current
     ) {
       return;
     }
 
-    interruptEnabledRef.current = true;
     clearInterruptRestartTimer();
 
     interruptRestartTimerRef.current =
@@ -208,32 +232,134 @@ export default function VoiceListener({ onSleep }: Props) {
         if (
           !mountedRef.current ||
           sleepingRef.current ||
+          !interruptAllowedRef.current ||
           !speakingRef.current ||
-          !interruptEnabledRef.current
+          interruptRunningRef.current
         ) {
           return;
         }
 
         try {
           interruptRecognitionRef.current?.start();
-
-          console.log(
-            "👂 Interrupt listener active."
-          );
         } catch {
-          // Interrupt listener is probably already active.
+          // Interrupt recognition may already be starting.
         }
       }, delay);
   }
 
-  function handleVoiceInterrupt() {
-    if (!speakingRef.current) return;
+  function stopInterruptRecognition() {
+    interruptAllowedRef.current = false;
+    clearInterruptRestartTimer();
 
-    console.warn(
-      "🛑 IGRIS interrupted by user."
+    try {
+      interruptRecognitionRef.current?.abort();
+    } catch {
+      // Interrupt recognition may already be inactive.
+    }
+  }
+
+  function resetSpeechPipeline() {
+    window.speechSynthesis.cancel();
+
+    speechQueueRef.current = [];
+    sentenceBufferRef.current = "";
+    fullResponseRef.current = "";
+
+    processingRef.current = false;
+    speakingRef.current = false;
+    speakingNowRef.current = false;
+  }
+
+  function enterSleepMode() {
+    if (sleepingRef.current) return;
+
+    sleepingRef.current = true;
+
+    streamSessionRef.current += 1;
+
+    stopMainRecognitionPermanently();
+    stopInterruptRecognition();
+    resetSpeechPipeline();
+
+    setStateRef.current("idle");
+
+    console.log(
+      "😴 IGRIS entered standby mode."
     );
 
-    // Invalidate current stream callbacks.
+    onSleepRef.current();
+  }
+
+  async function handleRelaxCommand() {
+    if (
+      sleepingRef.current ||
+      !mountedRef.current
+    ) {
+      return;
+    }
+
+    console.log(
+      "😴 Relax command accepted."
+    );
+
+    streamSessionRef.current += 1;
+
+    pauseMainRecognition();
+    stopInterruptRecognition();
+
+    window.speechSynthesis.cancel();
+
+    speechQueueRef.current = [];
+    sentenceBufferRef.current = "";
+    fullResponseRef.current = "";
+
+    processingRef.current = true;
+    speakingRef.current = true;
+    speakingNowRef.current = false;
+
+    const message =
+      "Understood. Entering standby mode.";
+
+    setTranscriptRef.current("Relax");
+    setResponseRef.current(message);
+    setStateRef.current("speaking");
+
+    await speakIgris(message, {
+      rate: 0.95,
+      pitch: 0.9,
+      volume: 1,
+      cancelBeforeSpeak: true,
+    });
+
+    if (
+      !mountedRef.current ||
+      sleepingRef.current
+    ) {
+      return;
+    }
+
+    processingRef.current = false;
+    speakingRef.current = false;
+    speakingNowRef.current = false;
+
+    enterSleepMode();
+  }
+
+  function handleVoiceInterrupt() {
+    if (
+      !processingRef.current &&
+      !speakingRef.current &&
+      !speakingNowRef.current &&
+      !window.speechSynthesis.speaking
+    ) {
+      return;
+    }
+
+    console.warn(
+      "🛑 IGRIS stop command accepted."
+    );
+
+    // Invalidate the current Ollama stream.
     streamSessionRef.current += 1;
 
     stopInterruptRecognition();
@@ -244,17 +370,19 @@ export default function VoiceListener({ onSleep }: Props) {
     sentenceBufferRef.current = "";
     fullResponseRef.current = "";
 
-    speakingNowRef.current = false;
-    speakingRef.current = false;
     processingRef.current = false;
+    speakingRef.current = false;
+    speakingNowRef.current = false;
 
+    setResponseRef.current("Stopped.");
     setStateRef.current("listening");
 
-    startMainRecognition(MIC_RESTART_DELAY);
-    scheduleSleepTimer();
+    resumeMainRecognition(400);
   }
 
-  function speak(text: string): Promise<void> {
+  function speak(
+    text: string
+  ): Promise<void> {
     return speakIgris(text, {
       rate: 0.95,
       pitch: 0.9,
@@ -262,11 +390,13 @@ export default function VoiceListener({ onSleep }: Props) {
     });
   }
 
-  async function drainSpeechQueue(): Promise<void> {
+  async function drainSpeechQueue() {
     if (speakingNowRef.current) return;
 
     speakingNowRef.current = true;
     speakingRef.current = true;
+
+    interruptAllowedRef.current = true;
 
     startInterruptRecognition(
       INTERRUPT_RESTART_DELAY
@@ -275,6 +405,7 @@ export default function VoiceListener({ onSleep }: Props) {
     try {
       while (
         mountedRef.current &&
+        !sleepingRef.current &&
         speakingRef.current &&
         speechQueueRef.current.length > 0
       ) {
@@ -290,26 +421,12 @@ export default function VoiceListener({ onSleep }: Props) {
 
       if (
         mountedRef.current &&
+        !sleepingRef.current &&
         speakingRef.current &&
         speechQueueRef.current.length > 0
       ) {
         void drainSpeechQueue();
       }
-    }
-  }
-
-  async function waitForSpeechToFinish(): Promise<void> {
-    while (
-      mountedRef.current &&
-      (
-        speakingNowRef.current ||
-        speechQueueRef.current.length > 0 ||
-        window.speechSynthesis.speaking
-      )
-    ) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 100);
-      });
     }
   }
 
@@ -323,9 +440,27 @@ export default function VoiceListener({ onSleep }: Props) {
     void drainSpeechQueue();
   }
 
+  async function waitForSpeechToFinish() {
+    while (
+      mountedRef.current &&
+      !sleepingRef.current &&
+      (
+        speakingNowRef.current ||
+        speechQueueRef.current.length > 0 ||
+        window.speechSynthesis.speaking
+      )
+    ) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 100);
+      });
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true;
     sleepingRef.current = false;
+    shouldRestartRef.current = true;
+    interruptAllowedRef.current = false;
 
     const SpeechRecognition =
       (window as any).SpeechRecognition ||
@@ -339,14 +474,14 @@ export default function VoiceListener({ onSleep }: Props) {
       return;
     }
 
-    const recognition = new SpeechRecognition();
+    const recognition =
+      new SpeechRecognition();
+
     const interruptRecognition =
       new SpeechRecognition();
 
     recognition.continuous = true;
     recognition.interimResults = false;
-
-    // User can speak Hindi/Hinglish.
     recognition.lang = "hi-IN";
 
     interruptRecognition.continuous = true;
@@ -358,204 +493,171 @@ export default function VoiceListener({ onSleep }: Props) {
       interruptRecognition;
 
     interruptRecognition.onstart = () => {
+      interruptRunningRef.current = true;
+
       console.log(
-        "👂 Listening for interrupt commands."
+        "👂 Interrupt listener active. Say: IGRIS stop."
       );
     };
 
-    interruptRecognition.onresult = (
-      event: any
-    ) => {
-      if (
-        sleepingRef.current ||
-        !speakingRef.current ||
-        !interruptEnabledRef.current
-      ) {
-        return;
-      }
+    interruptRecognition.onresult = (event: any) => {
+  if (
+    !mountedRef.current ||
+    sleepingRef.current ||
+    !interruptAllowedRef.current ||
+    !speakingRef.current
+  ) {
+    return;
+  }
 
-      let transcript = "";
+  let transcript = "";
 
-      for (
-        let index = event.resultIndex;
-        index < event.results.length;
-        index++
-      ) {
-        transcript +=
-          event.results[index]?.[0]?.transcript ??
-          "";
-      }
+  for (
+    let index = event.resultIndex;
+    index < event.results.length;
+    index++
+  ) {
+    transcript +=
+      event.results[index]?.[0]?.transcript ?? "";
+  }
 
-      const normalizedTranscript = transcript
-        .toLowerCase()
-        .trim();
+  const normalizedTranscript =
+    normalizeCommand(transcript);
 
-      if (!normalizedTranscript) return;
+  if (!normalizedTranscript) return;
 
-      console.log(
-        "Interrupt listener heard:",
-        normalizedTranscript
-      );
+  const stopDetected = [
+    "stop",
+    "स्टॉप",
+    "रुको",
+    "बस करो",
+    "shut up",
+  ].some((word) =>
+    normalizedTranscript.includes(
+      normalizeCommand(word)
+    )
+  );
 
-      const interruptCommands = [
-        "stop",
-        "stop igris",
-        "igris stop",
-        "wait",
-        "wait igris",
-        "shut up",
-        "be quiet",
-        "बस",
-        "रुको",
-        "चुप",
-      ];
+  if (stopDetected) {
+    console.log(
+      "🛑 INTERRUPT MATCHED:",
+      transcript
+    );
 
-      const interruptMatched =
-        interruptCommands.some(
-          (command) =>
-            normalizedTranscript === command ||
-            normalizedTranscript.includes(command)
-        );
-
-      if (interruptMatched) {
-        handleVoiceInterrupt();
-      }
-    };
+    handleVoiceInterrupt();
+  }
+};
 
     interruptRecognition.onerror = (
-      event: any
-    ) => {
-      if (
-        event.error === "aborted" ||
-        event.error === "no-speech"
-      ) {
-        return;
-      }
+  event: any
+) => {
+  if (
+    event.error === "aborted" ||
+    event.error === "no-speech"
+  ) {
+    return;
+  }
 
-      console.log(
-        "Interrupt recognition error:",
-        event.error
-      );
-    };
+  console.log(
+    "Interrupt recognition error:",
+    event.error
+  );
+};
 
     interruptRecognition.onend = () => {
+      interruptRunningRef.current = false;
+
       if (
         mountedRef.current &&
-        interruptEnabledRef.current &&
-        speakingRef.current &&
-        !sleepingRef.current
+        !sleepingRef.current &&
+        interruptAllowedRef.current &&
+        speakingRef.current
       ) {
-        startInterruptRecognition(300);
+        startInterruptRecognition(250);
       }
     };
 
     recognition.onstart = () => {
+      recognitionRunningRef.current = true;
+
       if (
-        sleepingRef.current ||
-        processingRef.current ||
-        speakingRef.current
+        !sleepingRef.current &&
+        !processingRef.current &&
+        !speakingRef.current
       ) {
-        return;
+        setStateRef.current("listening");
+
+        console.log(
+          "🎙️ IGRIS listening continuously."
+        );
       }
-
-      setStateRef.current("listening");
-
-      console.log(
-        "🎙️ IGRIS listening for a command."
-      );
     };
 
     recognition.onresult = async (
       event: any
     ) => {
       if (
+        !mountedRef.current ||
         sleepingRef.current ||
         processingRef.current ||
         speakingRef.current ||
         speakingNowRef.current ||
         window.speechSynthesis.speaking
       ) {
-        console.log(
-          "Audio ignored while IGRIS is busy."
-        );
-
         return;
       }
 
-      const resultIndex = event.resultIndex;
       const result =
-        event.results?.[resultIndex]?.[0];
+        event.results?.[event.resultIndex];
 
-      if (!result?.transcript) return;
+      if (!result || !result.isFinal) {
+        return;
+      }
 
-      const input = result.transcript.trim();
+      const input =
+        result[0]?.transcript?.trim() ?? "";
 
       if (!input) return;
 
-      console.log("User command:", input);
+      const normalizedInput =
+        normalizeCommand(input);
 
-      const normalizedInput = input
-        .toLowerCase()
-        .trim();
+      console.log(
+        "🎤 Recognition heard:",
+        input
+      );
 
-      const wakeOnlyPhrases = new Set([
-        "igris",
-        "hey igris",
-        "hello igris",
-        "wake up igris",
-        "ok igris",
-        "listen igris",
-        "egress",
-        "idris",
-        "idrees",
-        "igrees",
-      ]);
+      if (isRelaxCommand(input)) {
+        console.log(
+          "😴 RELAX MATCHED — entering standby."
+        );
 
-      if (wakeOnlyPhrases.has(normalizedInput)) {
+        await handleRelaxCommand();
+        return;
+      }
+
+      if (
+        WAKE_ONLY_PHRASES.has(normalizedInput)
+      ) {
         console.log(
           "Wake phrase tail ignored."
         );
 
-        scheduleSleepTimer();
         return;
       }
-
-      const stopCommands = [
-        "stop",
-        "shut up",
-        "wait",
-        "igris stop",
-        "stop igris",
-        "बस",
-        "रुको",
-        "चुप",
-      ];
-
-      const stopMatched = stopCommands.some(
-        (command) =>
-          normalizedInput === command ||
-          normalizedInput.includes(command)
-      );
-
-      if (stopMatched) {
-        handleVoiceInterrupt();
-        return;
-      }
-
-      clearSleepTimer();
 
       processingRef.current = true;
       speakingRef.current = true;
+      speakingNowRef.current = false;
 
-      stopMainRecognition();
-      stopInterruptRecognition();
+      // Main recognition is stopped before IGRIS answers.
+      pauseMainRecognition();
 
       window.speechSynthesis.cancel();
 
       speechQueueRef.current = [];
       sentenceBufferRef.current = "";
       fullResponseRef.current = "";
-      speakingNowRef.current = false;
 
       setTranscriptRef.current(input);
       setResponseRef.current("");
@@ -643,31 +745,34 @@ export default function VoiceListener({ onSleep }: Props) {
             await waitForSpeechToFinish();
 
             if (
-              !mountedRef.current ||
-              sleepingRef.current ||
               currentStreamSession !==
-                streamSessionRef.current
+              streamSessionRef.current
             ) {
               return;
             }
 
             stopInterruptRecognition();
 
+            if (
+              !mountedRef.current ||
+              sleepingRef.current
+            ) {
+              return;
+            }
+
+            processingRef.current = false;
             speakingRef.current = false;
             speakingNowRef.current = false;
-            processingRef.current = false;
 
             setStateRef.current("listening");
 
             console.log(
-              "✅ IGRIS finished speaking. Mic will reopen."
+              "✅ IGRIS finished speaking. Mic reopening."
             );
 
-            startMainRecognition(
+            resumeMainRecognition(
               MIC_RESTART_DELAY
             );
-
-            scheduleSleepTimer();
           }
         );
       } catch (error) {
@@ -684,29 +789,21 @@ export default function VoiceListener({ onSleep }: Props) {
         );
 
         stopInterruptRecognition();
-
-        window.speechSynthesis.cancel();
-
-        speechQueueRef.current = [];
-        sentenceBufferRef.current = "";
-
-        processingRef.current = false;
-        speakingRef.current = false;
-        speakingNowRef.current = false;
+        resetSpeechPipeline();
 
         setStateRef.current("listening");
 
-        startMainRecognition(
+        resumeMainRecognition(
           MIC_RESTART_DELAY
         );
-
-        scheduleSleepTimer();
       }
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (
+      event: any
+    ) => {
       console.log(
-        "Speech recognition error:",
+        "Speech recognition status:",
         event.error
       );
 
@@ -718,44 +815,52 @@ export default function VoiceListener({ onSleep }: Props) {
       }
 
       if (
-        shouldRestartRef.current &&
+        mountedRef.current &&
         !sleepingRef.current &&
+        shouldRestartRef.current &&
         !processingRef.current &&
         !speakingRef.current
       ) {
-        startMainRecognition(800);
+        startRecognition(700);
       }
     };
 
     recognition.onend = () => {
+      recognitionRunningRef.current = false;
+
       console.log(
-        "Microphone recognition session ended."
+        "Main recognition session ended."
       );
 
       if (
-        shouldRestartRef.current &&
+        mountedRef.current &&
         !sleepingRef.current &&
+        shouldRestartRef.current &&
         !processingRef.current &&
         !speakingRef.current &&
         !speakingNowRef.current &&
         !window.speechSynthesis.speaking
       ) {
-        startMainRecognition(300);
+        startRecognition(
+          MIC_RESTART_DELAY
+        );
       }
     };
 
-    startMainRecognition(700);
-    scheduleSleepTimer();
+    startRecognition(700);
 
     return () => {
       mountedRef.current = false;
       sleepingRef.current = true;
+
       shouldRestartRef.current = false;
-      interruptEnabledRef.current = false;
+      interruptAllowedRef.current = false;
+
+      recognitionRunningRef.current = false;
+      interruptRunningRef.current = false;
 
       streamSessionRef.current += 1;
 
-      clearSleepTimer();
       clearRestartTimer();
       clearInterruptRestartTimer();
 
@@ -782,6 +887,10 @@ export default function VoiceListener({ onSleep }: Props) {
       speechQueueRef.current = [];
       sentenceBufferRef.current = "";
       fullResponseRef.current = "";
+
+      processingRef.current = false;
+      speakingRef.current = false;
+      speakingNowRef.current = false;
     };
   }, []);
 
