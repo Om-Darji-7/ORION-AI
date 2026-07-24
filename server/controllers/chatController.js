@@ -1,49 +1,99 @@
-const { askOllama } = require("../services/ollamaService");
+const {
+  askOllama,
+} = require("../services/ollamaService");
+
+const systemPrompt = require(
+  "../prompts/systemPrompt"
+);
 
 async function chat(req, res) {
   try {
-    const { message } = req.body;
+    const message =
+      typeof req.body?.message === "string"
+        ? req.body.message.trim()
+        : "";
 
-    // Strict system role definitions passing straight to the cloud stream executor channels
-    const systemPrompt = require("../prompts/systemPrompt");
-    const formattedPrompt = `${systemPrompt}\n\nUSER: ${message}\n\nIGRIS:`;
+    if (!message) {
+      return res.status(400).json({
+        success: false,
+        message: "Message is required.",
+      });
+    }
 
-    // 1. Establish precise low latency Server Sent Events connection headers mapping
+    /*
+      The frontend message already contains:
+      - conversation memory
+      - response-depth instructions
+      - current user message
+
+      The backend system rules remain highest priority.
+    */
+    const formattedPrompt = `
+${systemPrompt}
+
+ASSISTANT TASK CONTEXT:
+${message}
+
+IGRIS FINAL ENGLISH RESPONSE:
+`.trim();
+
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
+      Connection: "keep-alive",
       "Access-Control-Allow-Origin": "*",
     });
 
-    // 2. Await asynchronous cloud engine initialization pipelines
-    const streamIterator = await askOllama(formattedPrompt);
+    const streamIterator =
+      await askOllama(formattedPrompt);
 
-    // 3. Loop dynamically through streaming events arriving over cloud network vectors
     for await (const partialChunkObj of streamIterator) {
-      const generatedTextToken = partialChunkObj.choices[0]?.delta?.content || "";
-      
-      if (generatedTextToken) {
-        // Write the token to the client connection line
-        res.write(`data: ${JSON.stringify({ text: generatedTextToken })}\n\n`);
-        
-        // Immediate flash system push logic to circumvent Express output delays
-        if (res.flush) res.flush();
+      const generatedTextToken =
+        partialChunkObj?.choices?.[0]?.delta
+          ?.content ?? "";
+
+      if (!generatedTextToken) continue;
+
+      res.write(
+        `data: ${JSON.stringify({
+          text: generatedTextToken,
+        })}\n\n`
+      );
+
+      if (typeof res.flush === "function") {
+        res.flush();
       }
     }
 
-    // 4. Send termination sentinel signal to frontend reader interfaces
     res.write("data: [DONE]\n\n");
     res.end();
+  } catch (error) {
+    console.error(
+      "Fatal error inside IGRIS chat pipeline:",
+      error
+    );
 
-  } catch (err) {
-    console.error("Fatal Error inside Groq Chat Pipeline Router:", err);
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Unknown server error.";
+
     if (!res.headersSent) {
-      res.status(500).json({ success: false, message: err.message });
-    } else {
-      res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-      res.end();
+      res.status(500).json({
+        success: false,
+        message,
+      });
+
+      return;
     }
+
+    res.write(
+      `data: ${JSON.stringify({
+        error: message,
+      })}\n\n`
+    );
+
+    res.end();
   }
 }
 
