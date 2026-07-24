@@ -3,6 +3,10 @@ import { streamOrion } from "../../services/orionAPI";
 import { useOrionStore } from "../../store/orionStore";
 import { speakIgris } from "../../services/voiceService";
 import { createEnglishResponseInstruction } from "../../services/languageService";
+import { conversationMemory } from "../../memory/conversationMemory";
+import { detectConversationCommand } from "../../memory/conversationCommands";
+import { factMemory } from "../../memory/facts/factMemory";
+import { extractMemoryFacts } from "../../services/memoryAPI";
 
 interface Props {
   onSleep: () => void;
@@ -52,6 +56,10 @@ export default function VoiceListener({ onSleep }: Props) {
 
   // Incrementing this invalidates callbacks from an old AI stream.
   const streamSessionRef = useRef(0);
+
+  const activeTurnIdRef = useRef<string | null>(
+  null
+);
 
   const onSleepRef = useRef(onSleep);
 
@@ -290,6 +298,143 @@ export default function VoiceListener({ onSleep }: Props) {
     onSleepRef.current();
   }
 
+async function speakLocalResponse(
+  transcript: string,
+  message: string
+): Promise<void> {
+  pauseMainRecognition();
+  stopInterruptRecognition();
+
+  window.speechSynthesis.cancel();
+
+  speechQueueRef.current = [];
+  sentenceBufferRef.current = "";
+  fullResponseRef.current = "";
+
+  processingRef.current = true;
+  speakingRef.current = true;
+  speakingNowRef.current = false;
+
+  setTranscriptRef.current(transcript);
+  setResponseRef.current(message);
+  setStateRef.current("speaking");
+
+  await speakIgris(message, {
+    rate: 0.95,
+    pitch: 0.9,
+    volume: 1,
+    cancelBeforeSpeak: true,
+  });
+
+  if (
+    !mountedRef.current ||
+    sleepingRef.current
+  ) {
+    return;
+  }
+
+  processingRef.current = false;
+  speakingRef.current = false;
+  speakingNowRef.current = false;
+
+  setStateRef.current("listening");
+
+  resumeMainRecognition(
+    MIC_RESTART_DELAY
+  );
+}
+
+function buildLocalConversationSummary(): string {
+  const messages =
+    conversationMemory.getRecentMessages(12);
+
+  const storedSummary =
+    conversationMemory.getSummary();
+
+  if (
+    messages.length === 0 &&
+    !storedSummary.trim()
+  ) {
+    return "We do not have any completed conversation history yet.";
+  }
+
+  const recentTopics = messages
+    .map((message) => {
+      const speaker =
+        message.role === "user"
+          ? "You"
+          : "IGRIS";
+
+      return `${speaker}: ${message.content}`;
+    })
+    .join("\n");
+
+  if (storedSummary.trim()) {
+    return [
+      `Previous summary: ${storedSummary}`,
+      "",
+      "Recent conversation:",
+      recentTopics,
+    ].join("\n");
+  }
+
+  return [
+    "Here is our recent conversation:",
+    recentTopics,
+  ].join("\n");
+}
+
+async function processMemoryFacts(
+  input: string
+): Promise<void> {
+  try {
+    const existingFacts =
+      factMemory.getFactsRecord();
+
+    const extractedFacts =
+      await extractMemoryFacts(
+        input,
+        existingFacts
+      );
+
+    for (const fact of extractedFacts) {
+      if (fact.operation === "delete") {
+        factMemory.removeFact(fact.key);
+
+        console.log(
+          `🧠 Extracted fact deleted: ${fact.key}`
+        );
+
+        continue;
+      }
+
+      factMemory.setFact({
+        key: fact.key,
+        value: fact.value,
+        displayName: fact.displayName,
+        confidence:
+          fact.confidence >= 0.9
+            ? "user-confirmed"
+            : "inferred",
+        sourceText: input,
+      });
+
+      console.log(
+        `🧠 Extracted fact stored: ${fact.key} = ${fact.value}`
+      );
+    }
+  } catch (error) {
+    /*
+      Memory extraction failure should never
+      stop the normal IGRIS response.
+    */
+    console.error(
+      "🧠 Background memory extraction failed:",
+      error
+    );
+  }
+}
+
   async function handleRelaxCommand() {
     if (
       sleepingRef.current ||
@@ -318,7 +463,7 @@ export default function VoiceListener({ onSleep }: Props) {
     speakingNowRef.current = false;
 
     const message =
-      "Understood. Entering standby mode.";
+      "OK Boss, I go for relax but If you need me, just double snap.";
 
     setTranscriptRef.current("Relax");
     setResponseRef.current(message);
@@ -361,6 +506,15 @@ export default function VoiceListener({ onSleep }: Props) {
 
     // Invalidate the current Ollama stream.
     streamSessionRef.current += 1;
+
+    if (activeTurnIdRef.current) {
+  conversationMemory.interruptTurn(
+    activeTurnIdRef.current,
+    fullResponseRef.current
+  );
+
+  activeTurnIdRef.current = null;
+}
 
     stopInterruptRecognition();
 
@@ -646,6 +800,84 @@ export default function VoiceListener({ onSleep }: Props) {
         return;
       }
 
+      const conversationCommand =
+  detectConversationCommand(input);
+
+  console.log(
+  "🧠 Detected conversation command:",
+  conversationCommand
+);
+
+if (
+  conversationCommand.type ===
+  "clear-conversation"
+) {
+  console.log(
+    "🧠 Clear conversation command matched."
+  );
+
+  conversationMemory.clearConversation();
+  factMemory.clearFacts();
+
+  await speakLocalResponse(
+    input,
+    "Conversation cleared. We can start fresh."
+  );
+
+  return;
+}
+
+if (
+  conversationCommand.type ===
+  "conversation-summary"
+) {
+  console.log(
+    "🧠 Conversation summary command matched."
+  );
+
+  const summaryMessage =
+    buildLocalConversationSummary();
+
+  await speakLocalResponse(
+    input,
+    summaryMessage
+  );
+
+  return;
+}
+
+if (
+  conversationCommand.type ===
+  "set-response-mode"
+) {
+  conversationMemory.setResponseMode(
+    conversationCommand.mode
+  );
+
+  const responseMessages = {
+     auto:
+    "Automatic response mode enabled. I will decide the appropriate answer depth myself.",
+
+    concise:
+      "Concise mode enabled. I will keep my answers short and direct.",
+
+    normal:
+      "Normal response mode enabled.",
+
+    detailed:
+      "Detailed mode enabled. I will give more complete explanations.",
+  };
+
+  await speakLocalResponse(
+    input,
+    responseMessages[
+      conversationCommand.mode
+    ]
+  );
+
+  return;
+}
+      void processMemoryFacts(input);
       processingRef.current = true;
       speakingRef.current = true;
       speakingNowRef.current = false;
@@ -664,12 +896,36 @@ export default function VoiceListener({ onSleep }: Props) {
       setStateRef.current("thinking");
 
       console.log(
-        "Sending command to IGRIS:",
-        input
-      );
+  "Sending command to IGRIS:",
+  input
+);
 
-      const modelInput =
-        createEnglishResponseInstruction(input);
+const turnId =
+  conversationMemory.startTurn(input);
+
+activeTurnIdRef.current = turnId;
+
+const recentMessages =
+  conversationMemory.getRecentMessages(30);
+
+const conversationSummary =
+  conversationMemory.getSummary();
+
+const responseMode =
+  conversationMemory.getResponseMode();
+
+const modelInput =
+  createEnglishResponseInstruction(input, {
+    recentMessages,
+    summary: conversationSummary,
+    responseMode,
+  });
+
+console.log(
+  "🧠 Context sent to IGRIS:",
+  recentMessages.length,
+  "completed messages"
+);
 
       const currentStreamSession =
         ++streamSessionRef.current;
@@ -751,6 +1007,17 @@ export default function VoiceListener({ onSleep }: Props) {
               return;
             }
 
+            if (
+              activeTurnIdRef.current === turnId
+            ) {
+              conversationMemory.completeTurn(
+                turnId,
+                fullResponseRef.current
+              );
+            
+              activeTurnIdRef.current = null;
+            }
+
             stopInterruptRecognition();
 
             if (
@@ -787,6 +1054,14 @@ export default function VoiceListener({ onSleep }: Props) {
           "IGRIS pipeline error:",
           error
         );
+
+        if (
+          activeTurnIdRef.current === turnId
+        ) {
+          conversationMemory.failTurn(turnId);
+        
+          activeTurnIdRef.current = null;
+        }
 
         stopInterruptRecognition();
         resetSpeechPipeline();
@@ -860,6 +1135,15 @@ export default function VoiceListener({ onSleep }: Props) {
       interruptRunningRef.current = false;
 
       streamSessionRef.current += 1;
+
+      if (activeTurnIdRef.current) {
+        conversationMemory.interruptTurn(
+          activeTurnIdRef.current,
+          fullResponseRef.current
+        );
+      
+        activeTurnIdRef.current = null;
+      }
 
       clearRestartTimer();
       clearInterruptRestartTimer();
